@@ -1,3 +1,11 @@
+/*  Safety helmet code
+        11/2021
+    Send GPS coordinates via LoRa WAN
+    Detect fall with accelerometer and send LoRa message
+    Turn on lights when it's dark (and off when it's not)
+*/
+
+// Libraries
 #include <rn2xx3.h>
 #include <SoftwareSerial.h>
 #include <TinyGPS++.h>
@@ -5,50 +13,62 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
 
+// Pins
 #define RESET 15
+#define RX_GPS 6
+#define TX_GPS 5
+#define RX_LORA 4
+#define TX_LORA 3
+#define LEDs 7
+#define LightSensor A3
 
-static const int RX_GPS = 6, TX_GPS = 5;
-static const int RX_Lora = 4, TX_Lora = 3;
+// Baudrates
 static const uint32_t SerialMonitorBaud = 115200;
 static const uint32_t GPSBaud = 9600;
 static const uint32_t LoraBaud = 57600;
 
+// Global variables
 char latitude[15];
 char longitude[15];
 char message[35];
-bool fall = false;
+int brightness;
+float g; // gravity acceleration
+bool fall = false; // true if a fall is detected
 
+// Accelerometer
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified();
 
 // The TinyGPS++ object
 TinyGPSPlus gps;
 
+// Serial connections (be careful to use only one at a time)
 SoftwareSerial GPSSerial(RX_GPS, TX_GPS); // Serial connection to the GPS device
-SoftwareSerial LoraSerial(RX_Lora, TX_Lora); // Serial connection to the Lora device
+SoftwareSerial LoraSerial(RX_LORA, TX_LORA); // Serial connection to the Lora device
 
-//create an instance of the rn2xx3 library,
-//giving the software UART as stream to use,
-//and using LoRa WAN
+// Create an instance of the rn2xx3 library, giving the software UART as stream to use, and using LoRa WAN
 rn2xx3 myLora(LoraSerial);
 
-// the setup routine runs once when you press reset:
+
+
+// -------------------- SETUP --------------------
 void setup() {
 
-  if (!accel.begin())
-  {
-    Serial.println("No valid sensor found");
-    while (1);
-  }
-
-  // LED pin is GPIO2 which is the ESP8266's built in LED
-  pinMode(LED_BUILTIN, OUTPUT);
-  led_on();
+  // Init inputs/outputs
+  pinMode(LEDs, OUTPUT);
+  pinMode(LightSensor, INPUT);
+  //pinMode(LED_BUILTIN, OUTPUT); // Builtin LED
 
   // Open serial communications and wait for port to open:
-  Serial.begin(SerialMonitorBaud);
   LoraSerial.begin(LoraBaud);
+  Serial.begin(SerialMonitorBaud);
+  delay(1000); // Wait for the arduino ide's serial console to open
 
-  delay(1000); //wait for the arduino ide's serial console to open
+
+  // Check accelerometer
+  if (!accel.begin())
+  {
+    Serial.println("Accelerometer not found");
+  }
 
   Serial.println("Startup");
 
@@ -58,24 +78,104 @@ void setup() {
   //myLora.tx("TTN Mapper on Uno node");
   LoraSerial.end();
 
-  led_off();
   delay(3000);
 }
 
 
-// Lora
+// -------------------- LOOP --------------------
+void loop() {
+
+  // Get photoresistor value
+  brightness = analogRead(LightSensor);
+
+  // Backlight on if it's dark:
+  Serial.print("Brightness: "); Serial.println(brightness);
+  if (brightness <= 150 && brightness >= 30) // May need to change the values
+  {
+    digitalWrite(LEDs, HIGH);
+    Serial.println("Backlight ON");
+  } else {
+    digitalWrite(LEDs, LOW);
+    Serial.println("Backlight OFF");
+  }
+
+
+  // Get accelerometer values
+  sensors_event_t event;
+  accel.getEvent(&event);
+
+  // Compute g value and compare it to a treshold:
+  g = sqrt(pow(event.acceleration.x, 2) + pow(event.acceleration.y, 2) + pow(event.acceleration.z, 2));
+  if (g > 20) {
+    Serial.println("Fall");
+    fall = true;
+  }
+
+
+  // GPS
+  GPSSerial.begin(GPSBaud);
+  delay(1000);
+
+  while (GPSSerial.available() > 0)
+    if (gps.encode(GPSSerial.read()))
+      getGPSInfo();
+
+  // Check GPS module
+  if (millis() > 5000 && gps.charsProcessed() < 10)
+  {
+    Serial.println(F("No GPS detected: check wiring."));
+  }
+
+  GPSSerial.end();
+  delay(1000);
+
+
+  // LoRa
+  LoraSerial.begin(LoraBaud);
+  delay(1000);
+  myLora.sendRawCommand(F("mac set adr on"));
+  Serial.println("OK");
+  delay(500);
+
+  // Prepare message:
+  strcpy(message, latitude);
+  strcat(message, ",");
+  strcat(message, longitude);
+  //Serial.print("message: ");
+  //Serial.println(message);
+
+  // Send message with LoRa
+  myLora.tx(message);
+
+  // Send fall if falling
+  if (fall) {
+    myLora.tx("fall");
+    fall = false;
+  }
+
+  LoraSerial.end();
+
+  delay(3000);
+}
+
+
+
+// -------------------- FUNCTIONS --------------------
+
+
+// LoRa initialization
 void initialize_radio()
 {
-  //reset RN2xx3
+  // Reset RN2xx3
   pinMode(RESET, OUTPUT);
   digitalWrite(RESET, LOW);
   delay(100);
   digitalWrite(RESET, HIGH);
 
-  delay(100); //wait for the RN2xx3's startup message
+  delay(100); // Wait for the RN2xx3's startup message
   LoraSerial.flush();
 
-  //check communication with radio
+  // Check communication with radio
   String hweui = myLora.hweui();
   while (hweui.length() != 16)
   {
@@ -109,59 +209,8 @@ void initialize_radio()
 }
 
 
-// the loop routine runs over and over again forever:
-void loop() {
-
-  sensors_event_t event;
-  accel.getEvent(&event);
-  float g = sqrt(pow(event.acceleration.x, 2) + pow(event.acceleration.y, 2) + pow(event.acceleration.z, 2));
-  if (g > 20) {
-    Serial.println("Fall");
-    fall = true;
-  }
-
-  GPSSerial.begin(GPSBaud);
-  delay(1000);
-
-  // This sketch displays information every time a new sentence is correctly encoded.
-  while (GPSSerial.available() > 0)
-    if (gps.encode(GPSSerial.read()))
-      displayGPSInfo();
-
-  if (millis() > 5000 && gps.charsProcessed() < 10)
-  {
-    Serial.println(F("No GPS detected: check wiring."));
-    while (true);
-  }
-
-  GPSSerial.end();
-  delay(1000);
-
-  led_on();
-
-  LoraSerial.begin(LoraBaud);
-  delay(1000);
-  myLora.sendRawCommand(F("mac set adr on"));
-  Serial.println("OK");
-  delay(500);
-
-  myLora.tx(message); //one byte, blocking function
-  //send fall if falling
-  if (fall) {
-    myLora.tx("fall");
-    fall = false;
-  }
-
-  LoraSerial.end();
-
-  led_off();
-
-  delay(3000);
-}
-
-
-// GPS
-void displayGPSInfo()
+// Get GPS coordinates
+void getGPSInfo()
 {
   Serial.print(F("Location: "));
   if (gps.location.isValid())
@@ -179,13 +228,6 @@ void displayGPSInfo()
     strcpy(latitude, "0.0");
     strcpy(longitude, "0.0");
   }
-
-  // prepare message:
-  strcpy(message, latitude);
-  strcat(message, ",");
-  strcat(message, longitude);
-  //Serial.print("message: ");
-  //Serial.println(message);
 
   Serial.print(F("  Date/Time: "));
   if (gps.date.isValid())
@@ -222,16 +264,4 @@ void displayGPSInfo()
   }
 
   Serial.println();
-}
-
-
-// builtin LED
-void led_on()
-{
-  digitalWrite(LED_BUILTIN, 1);
-}
-
-void led_off()
-{
-  digitalWrite(LED_BUILTIN, 0);
 }
