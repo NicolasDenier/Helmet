@@ -109,6 +109,8 @@ void loop() {
   if (g > 20) {
     Serial.println("Fall");
     fall = true;
+  } else {
+    fall = false;
   }
 
 
@@ -150,7 +152,6 @@ void loop() {
   // Send fall if falling
   if (fall) {
     myLora.tx("fall");
-    fall = false;
   }
 
   LoraSerial.end();
